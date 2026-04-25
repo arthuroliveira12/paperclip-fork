@@ -1,0 +1,35 @@
+# Dockerfile for the Contabil-Agent FastAPI service.
+#
+# This image is intentionally lightweight: it installs Python deps from the
+# Contabil-Agent requirements.txt and relies on a runtime bind-mount of the
+# host's Contabil-Agent source tree at /app for fast dev iteration.
+#
+# Build context (set in docker-compose.yml) MUST point at the Contabil-Agent
+# repo root so requirements.txt is reachable during build.
+
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# System deps: curl is used by healthcheck fallback and useful for debug.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies. We copy only requirements.txt so layer cache
+# is not invalidated by every code change (code is bind-mounted at runtime).
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt \
+    && pip install --no-cache-dir "uvicorn[standard]"
+
+EXPOSE 8000
+
+# Healthcheck hits the API root. /docs is always served by FastAPI by default.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=6 \
+    CMD curl -fsS http://localhost:8000/docs >/dev/null || exit 1
+
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]

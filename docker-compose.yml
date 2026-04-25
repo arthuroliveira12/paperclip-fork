@@ -1,0 +1,108 @@
+# docker-compose para validacao local Paperclip + Contabil-Agent.
+#
+# Usage:
+#   # com Contabil-Agent clonado em ../Contabil-Agent (sibling do paperclip-fork)
+#   docker compose up --build
+#
+#   # ou aponte para outro path
+#   CONTABIL_AGENT_HOST_PATH=/abs/path/to/Contabil-Agent docker compose up --build
+#
+# Servicos:
+#   - postgres     : Postgres 16 dedicado (Paperclip nao roda embedded dentro
+#                    do container Linux; usamos um service dedicado).
+#   - contabil-api : FastAPI (uvicorn) na porta 8000
+#   - paperclip    : servidor Paperclip na porta 3100, com plugin contabil-agent
+#                    apontando para http://contabil-api:8000 via DNS interno.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: paperclip-postgres
+    environment:
+      - POSTGRES_USER=paperclip
+      - POSTGRES_PASSWORD=paperclip
+      - POSTGRES_DB=paperclip
+    volumes:
+      - paperclip_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperclip -d paperclip"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 10
+    restart: unless-stopped
+
+  contabil-api:
+    build:
+      # Contexto = repo Contabil-Agent (para requirements.txt ser reachable).
+      context: ${CONTABIL_AGENT_HOST_PATH:-../Contabil-Agent}
+      # Dockerfile vive no paperclip-fork (versionado junto com o plugin).
+      # Path relativo ao contexto acima.
+      dockerfile: ../paperclip-fork/Dockerfile.contabil-api
+    image: contabil-agent-api:dev
+    container_name: contabil-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Bind-mount do source para hot-reload manual (uvicorn --reload nao
+      # esta ativo por padrao; reinicie o service apos mudancas se preciso).
+      - ${CONTABIL_AGENT_HOST_PATH:-../Contabil-Agent}:/app
+      # Volumes nomeados para persistir DB e artefatos entre rebuilds.
+      - contabil_data:/app/data
+      - contabil_uploads:/app/uploads
+      - contabil_output:/app/output
+      - contabil_logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Chaves de LLM podem ser passadas via .env do host (docker compose
+      # auto-carrega arquivo .env adjacente). Nao commitar segredos.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/docs"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 6
+    restart: unless-stopped
+
+  paperclip:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USER_UID: "1000"
+        USER_GID: "1000"
+    image: paperclip:dev
+    container_name: paperclip
+    ports:
+      - "3100:3100"
+    environment:
+      - PORT=3100
+      - SERVE_UI=true
+      - PAPERCLIP_API_URL=http://localhost:3100
+      - BETTER_AUTH_SECRET=paperclip-dev-secret-change-me
+      # DNS interno do compose: o container paperclip enxerga
+      # contabil-api por nome de service.
+      - CONTABIL_AGENT_API_URL=http://contabil-api:8000
+      - DATABASE_URL=postgres://paperclip:paperclip@postgres:5432/paperclip
+    depends_on:
+      contabil-api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3100/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      start_period: 60s
+      retries: 6
+    restart: unless-stopped
+
+volumes:
+  contabil_data:
+  contabil_uploads:
+  contabil_output:
+  contabil_logs:
+  paperclip_pgdata:

@@ -1,0 +1,7 @@
+# Force LF line endings for shell scripts and other Unix-only files
+# Prevents Windows checkouts from breaking shebangs in container builds
+*.sh text eol=lf
+Dockerfile text eol=lf
+Dockerfile.* text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
