@@ -14,8 +14,10 @@
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
-    "typecheck": "pnpm --filter @paperclipai/plugin-sdk build && tsc --noEmit",
-    "test": "vitest run"
+    "typecheck": "pnpm --filter @paperclipai/plugin-sdk build && tsc --noEmit && tsc -p tsconfig.scripts.json --noEmit",
+    "test": "vitest run",
+    "bootstrap": "tsx scripts/bootstrap.ts",
+    "setup-routines": "tsx scripts/setup-routines.ts"
   },
   "dependencies": {
     "@paperclipai/plugin-sdk": "workspace:*"
@@ -28,6 +30,7 @@
     "jsdom": "^28.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.7.3",
     "vitest": "^3.0.5"
   },

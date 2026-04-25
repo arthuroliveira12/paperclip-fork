@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "scripts",
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": ["scripts"]
+}
