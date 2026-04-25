@@ -16,6 +16,7 @@ import type {
   ContabilAgentClient,
   CreateSessionInput,
 } from "../http-client.js";
+import type { EventListener } from "../event-listener.js";
 
 /**
  * Arquivo de extrato a ser enviado ao backend.
@@ -84,9 +85,17 @@ export const PROCESSAR_FECHAMENTO_NAME = "processar_fechamento";
 
 /**
  * Constroi o handler da tool, fechando sobre uma instancia compartilhada
- * de `ContabilAgentClient`. O worker injeta o cliente no setup().
+ * de `ContabilAgentClient` e — opcionalmente — um `EventListener` que
+ * sera ligado a sessao recem-criada (T13).
+ *
+ * O `listener` eh opcional para preservar a assinatura usada pelos testes
+ * de T10; quando passado, o handler chama `listener.attach(sessao_id, runId)`
+ * apos `patchSession` ter completado com sucesso.
  */
-export function makeProcessarFechamentoHandler(client: ContabilAgentClient) {
+export function makeProcessarFechamentoHandler(
+  client: ContabilAgentClient,
+  listener?: EventListener,
+) {
   return async function handler(
     params: unknown,
     runCtx: ToolRunContext,
@@ -114,6 +123,17 @@ export function makeProcessarFechamentoHandler(client: ContabilAgentClient) {
     await client.patchSession(sessao.sessao_id, {
       paperclip_task_id: runCtx.runId,
     });
+
+    // T13: liga o WS de eventos do pipeline a esta sessao (se o worker
+    // injetou um listener). Erros de attach nao devem derrubar a tool —
+    // o listener loga internamente e tentara reconectar.
+    if (listener) {
+      try {
+        listener.attach(sessao.sessao_id, runCtx.runId);
+      } catch {
+        // ignore: o listener ja loga; nao bloqueia o retorno da tool.
+      }
+    }
 
     const output: ProcessarFechamentoOutput = {
       sessao_id: sessao.sessao_id,
