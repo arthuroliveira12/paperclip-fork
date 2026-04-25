@@ -89,6 +89,43 @@ export interface CreateScheduleTriggerBody {
   enabled?: boolean;
 }
 
+/**
+ * Body para POST /api/companies/:companyId/cost-events.
+ * Mantemos espelho fiel ao `createCostEventSchema` em
+ * packages/shared/src/validators/cost.ts (T18).
+ */
+export interface CreateCostEventBody {
+  agentId: string;
+  issueId?: string | null;
+  projectId?: string | null;
+  goalId?: string | null;
+  heartbeatRunId?: string | null;
+  billingCode?: string | null;
+  provider: string;
+  biller?: string;
+  billingType?: string;
+  model: string;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  /** Valor em centavos (inteiro). */
+  costCents: number;
+  /** ISO 8601. */
+  occurredAt: string;
+}
+
+export interface CostEvent {
+  id: string;
+  companyId: string;
+  agentId: string;
+  model: string;
+  costCents: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  occurredAt: string;
+  [extra: string]: unknown;
+}
+
 export class PaperclipAdminError extends Error {
   constructor(
     message: string,
@@ -159,6 +196,21 @@ export class PaperclipAdminClient {
     return this.request<Routine>(
       "POST",
       `/companies/${encodeURIComponent(companyId)}/routines`,
+      body,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Cost Events (T18)
+  // -------------------------------------------------------------------------
+
+  async createCostEvent(
+    companyId: string,
+    body: CreateCostEventBody,
+  ): Promise<CostEvent> {
+    return this.request<CostEvent>(
+      "POST",
+      `/companies/${encodeURIComponent(companyId)}/cost-events`,
       body,
     );
   }

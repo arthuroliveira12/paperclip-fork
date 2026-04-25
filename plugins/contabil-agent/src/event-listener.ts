@@ -62,6 +62,15 @@ export interface ErroDados {
   traceback?: string;
 }
 export interface MetricaDados {
+  /**
+   * Discriminador da metrica. Apenas `llm_call` vira Cost Event no Paperclip
+   * (T18). Outras metricas (latencia, contadores, etc.) sao apenas logadas.
+   */
+  tipo?: string;
+  tokens_input?: number;
+  tokens_output?: number;
+  modelo?: string;
+  custo_usd?: number;
   [k: string]: unknown;
 }
 
@@ -88,8 +97,29 @@ export interface PaperclipSideEffects {
     payload?: { artifacts?: ArtifactDados[] },
   ): Promise<void>;
   markTaskFailed(taskRunId: string, payload: ErroDados): Promise<void>;
-  /** Opcional — T18 registra o handler real de cost events. */
-  recordCostEvent?(taskRunId: string, payload: MetricaDados): Promise<void>;
+  /**
+   * Opcional — T18 registra o handler real de cost events.
+   *
+   * O 3o argumento (`context`) carrega `companyId`/`agentId` da sessao,
+   * necessarios para o POST /api/companies/:companyId/cost-events do
+   * Paperclip server. Quando ausente (sessao registrada sem contexto),
+   * o handler pode optar por logar e ignorar.
+   */
+  recordCostEvent?(
+    taskRunId: string,
+    payload: MetricaDados,
+    context?: SessionContext,
+  ): Promise<void>;
+}
+
+/**
+ * Contexto opcional de sessao usado por handlers que precisam saber a qual
+ * Company/Agent pertencem os eventos (T18 — cost events). Os campos sao
+ * passados pelo `attach()` e armazenados na `AttachedSession`.
+ */
+export interface SessionContext {
+  companyId?: string;
+  agentId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +156,8 @@ interface AttachedSession {
   reconnectHandle: unknown | null;
   /** true quando detach foi chamado — evita reconexao. */
   detaching: boolean;
+  /** Opcional — usado por handlers como `recordCostEvent` (T18). */
+  context?: SessionContext;
 }
 
 // ---------------------------------------------------------------------------
@@ -153,8 +185,18 @@ export class EventListener {
     };
   }
 
-  /** Abre o WS para a sessao e mantem aberto (com reconnect) ate detach. */
-  attach(sessaoId: string, taskRunId: string): void {
+  /**
+   * Abre o WS para a sessao e mantem aberto (com reconnect) ate detach.
+   *
+   * @param context T18 — opcional; quando informado, eventos `metrica` do
+   *   tipo `llm_call` chamam `recordCostEvent` com este contexto, permitindo
+   *   ao handler postar /api/companies/:companyId/cost-events.
+   */
+  attach(
+    sessaoId: string,
+    taskRunId: string,
+    context?: SessionContext,
+  ): void {
     if (this.sessions.has(sessaoId)) {
       this.logger.warn(
         `[contabil-agent] attach ignorado: sessao ${sessaoId} ja conectada`,
@@ -168,6 +210,7 @@ export class EventListener {
       reconnectAttempt: 0,
       reconnectHandle: null,
       detaching: false,
+      context,
     };
     this.sessions.set(sessaoId, state);
     this.openSocket(state);
@@ -301,15 +344,25 @@ export class EventListener {
         await this.effects.markTaskFailed(taskId, d);
         return;
       }
-      case "metrica":
+      case "metrica": {
+        // T18: filtra por dados.tipo === 'llm_call'. Outras metricas sao
+        // apenas logadas (latencia, contadores etc.) — nao geram Cost Event.
+        const m = (dados ?? {}) as MetricaDados;
+        if (m.tipo !== "llm_call") {
+          this.logger.debug(
+            `[contabil-agent] metrica nao-llm_call sessao=${state.sessaoId} tipo=${String(m.tipo ?? "<sem tipo>")}`,
+          );
+          return;
+        }
         if (this.effects.recordCostEvent) {
-          await this.effects.recordCostEvent(taskId, dados as MetricaDados);
+          await this.effects.recordCostEvent(taskId, m, state.context);
         } else {
           this.logger.debug(
-            `[contabil-agent] metrica recebida sessao=${state.sessaoId} (sem handler T18)`,
+            `[contabil-agent] metrica llm_call recebida sessao=${state.sessaoId} (sem handler injetado)`,
           );
         }
         return;
+      }
       default:
         this.logger.debug(
           `[contabil-agent] evento desconhecido tipo=${tipo} sessao=${state.sessaoId}`,

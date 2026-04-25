@@ -5,6 +5,11 @@ import {
   EventListener,
   type PaperclipSideEffects,
 } from "./event-listener.js";
+// NB: PaperclipAdminClient vive em scripts/_admin-client.ts (fora do rootDir
+// `src/`), portanto nao pode ser importado direto pelo worker. Para T18,
+// inlineamos um POST minimo aqui — mesmo contrato (`POST /api/companies/
+// :companyId/cost-events`) e mesmo body schema (createCostEventSchema em
+// packages/shared/src/validators/cost.ts).
 import {
   PROCESSAR_FECHAMENTO_NAME,
   makeProcessarFechamentoHandler,
@@ -23,6 +28,50 @@ import {
 
 const PLUGIN_NAME = "contabil-agent";
 const DEFAULT_API_URL = "http://localhost:8000";
+const DEFAULT_PAPERCLIP_URL = "http://localhost:3000";
+
+/**
+ * Converte um custo em USD (float) para centavos inteiros, como o servidor
+ * Paperclip exige (`costCents: z.number().int().nonnegative()`). Usa USD-cents
+ * por compatibilidade ate haver currency conversion no pipeline.
+ */
+function usdToCents(usd: number | undefined): number {
+  if (typeof usd !== "number" || !Number.isFinite(usd) || usd < 0) return 0;
+  return Math.round(usd * 100);
+}
+
+/**
+ * POST /api/companies/:companyId/cost-events — espelha o body do
+ * `createCostEventSchema` em packages/shared/src/validators/cost.ts.
+ */
+async function postCostEventToPaperclip(
+  paperclipBaseUrl: string,
+  companyId: string,
+  body: {
+    agentId: string;
+    issueId?: string | null;
+    provider: string;
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    costCents: number;
+    occurredAt: string;
+  },
+  authToken?: string,
+): Promise<void> {
+  const url = `${paperclipBaseUrl.replace(/\/+$/, "")}/api/companies/${encodeURIComponent(companyId)}/cost-events`;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`POST ${url} -> ${res.status} ${text}`);
+  }
+}
 
 /**
  * Worker entrypoint para o plugin contabil-agent.
@@ -42,6 +91,11 @@ const plugin = definePlugin({
       baseUrl,
       logger: ctx.logger,
     });
+
+    // T18: configuracao do POST cost-events no Paperclip server.
+    const paperclipUrl =
+      process.env.PAPERCLIP_API_URL ?? DEFAULT_PAPERCLIP_URL;
+    const paperclipToken = process.env.PAPERCLIP_AUTH_TOKEN;
 
     // T13: side effects do Paperclip ainda nao sao expostos ao plugin worker
     // pelo SDK (ToolRunContext = {agentId,runId,companyId,projectId} apenas).
@@ -74,7 +128,56 @@ const plugin = definePlugin({
           `[${PLUGIN_NAME}] task=${taskRunId} FAILED: ${payload.erro}`,
         );
       },
-      // recordCostEvent fica indefinido ate T18 plugar o handler real.
+      // T18: cost events. Filtra `dados.tipo === 'llm_call'` ja eh feito no
+      // listener; aqui apenas posta no Paperclip server via admin client.
+      // Falhas NAO derrubam o pipeline (log + continue).
+      async recordCostEvent(taskRunId, payload, context) {
+        const companyId =
+          context?.companyId ?? process.env.CONTABIL_AGENT_COMPANY_ID;
+        const agentId =
+          context?.agentId ?? process.env.CONTABIL_AGENT_AGENT_ID;
+
+        if (!companyId || !agentId) {
+          // Sem contexto suficiente para postar no Paperclip — apenas loga.
+          ctx.logger.info(
+            `[${PLUGIN_NAME}] cost-event task=${taskRunId} modelo=${String(payload.modelo ?? "?")} custo_usd=${String(payload.custo_usd ?? 0)} ` +
+              `(NAO postado: ${!companyId ? "companyId" : "agentId"} ausente; ` +
+              `defina CONTABIL_AGENT_COMPANY_ID/CONTABIL_AGENT_AGENT_ID ou passe context em attach())`,
+          );
+          return;
+        }
+
+        try {
+          await postCostEventToPaperclip(
+            paperclipUrl,
+            companyId,
+            {
+              agentId,
+              issueId: taskRunId, // task/run id do Paperclip
+              provider: "contabil-agent",
+              model: String(payload.modelo ?? "unknown"),
+              inputTokens:
+                typeof payload.tokens_input === "number"
+                  ? payload.tokens_input
+                  : 0,
+              outputTokens:
+                typeof payload.tokens_output === "number"
+                  ? payload.tokens_output
+                  : 0,
+              costCents: usdToCents(payload.custo_usd),
+              occurredAt: new Date().toISOString(),
+            },
+            paperclipToken,
+          );
+          ctx.logger.debug(
+            `[${PLUGIN_NAME}] cost-event registrado task=${taskRunId} modelo=${String(payload.modelo ?? "?")}`,
+          );
+        } catch (err) {
+          ctx.logger.warn(
+            `[${PLUGIN_NAME}] falha ao registrar cost-event task=${taskRunId}: ${String(err)} (ignorando — listener segue)`,
+          );
+        }
+      },
     };
 
     const eventListener = new EventListener({

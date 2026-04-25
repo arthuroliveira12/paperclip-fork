@@ -213,21 +213,125 @@ describe("EventListener (T13)", () => {
     });
   });
 
-  it("em metrica: chama recordCostEvent quando definido", async () => {
+  it("em metrica tipo=llm_call: chama recordCostEvent com payload", async () => {
     const recordCostEvent = vi.fn().mockResolvedValue(undefined);
     const effects = makeEffects({ recordCostEvent });
     const listener = new EventListener({ client, effects, scheduler });
     listener.attach("sess-m", "task-m");
     ws.emitMessage({
       tipo: "metrica",
-      dados: { provider: "openai", tokens_in: 1200, cost_usd: 0.012 },
+      dados: {
+        tipo: "llm_call",
+        tokens_input: 1200,
+        tokens_output: 300,
+        modelo: "gpt-4o",
+        custo_usd: 0.012,
+      },
     });
     await flush();
-    expect(recordCostEvent).toHaveBeenCalledWith("task-m", {
-      provider: "openai",
-      tokens_in: 1200,
-      cost_usd: 0.012,
+    expect(recordCostEvent).toHaveBeenCalledTimes(1);
+    expect(recordCostEvent).toHaveBeenCalledWith(
+      "task-m",
+      {
+        tipo: "llm_call",
+        tokens_input: 1200,
+        tokens_output: 300,
+        modelo: "gpt-4o",
+        custo_usd: 0.012,
+      },
+      undefined,
+    );
+  });
+
+  it("T18: attach com context propaga companyId/agentId no recordCostEvent", async () => {
+    const recordCostEvent = vi.fn().mockResolvedValue(undefined);
+    const effects = makeEffects({ recordCostEvent });
+    const listener = new EventListener({ client, effects, scheduler });
+    listener.attach("sess-ctx", "task-ctx", {
+      companyId: "co-1",
+      agentId: "ag-1",
     });
+    ws.emitMessage({
+      tipo: "metrica",
+      dados: {
+        tipo: "llm_call",
+        tokens_input: 10,
+        tokens_output: 5,
+        modelo: "gpt-4o",
+        custo_usd: 0.0001,
+      },
+    });
+    await flush();
+    expect(recordCostEvent).toHaveBeenCalledWith(
+      "task-ctx",
+      expect.objectContaining({ tipo: "llm_call" }),
+      { companyId: "co-1", agentId: "ag-1" },
+    );
+  });
+
+  // T18: filtro por dados.tipo === 'llm_call'
+  it("T18: metrica nao-llm_call NAO dispara recordCostEvent (apenas log)", async () => {
+    const recordCostEvent = vi.fn().mockResolvedValue(undefined);
+    const effects = makeEffects({ recordCostEvent });
+    const listener = new EventListener({ client, effects, scheduler });
+    listener.attach("sess-nlc", "task-nlc");
+    ws.emitMessage({
+      tipo: "metrica",
+      dados: { tipo: "latencia_ms", valor: 4321 },
+    });
+    ws.emitMessage({
+      tipo: "metrica",
+      // sem dados.tipo
+      dados: { foo: "bar" },
+    });
+    await flush();
+    expect(recordCostEvent).not.toHaveBeenCalled();
+  });
+
+  // T18: agregacao mista — apenas llm_call viram cost events
+  it("T18: 3 metricas mistas — apenas as llm_call disparam recordCostEvent", async () => {
+    const recordCostEvent = vi.fn().mockResolvedValue(undefined);
+    const effects = makeEffects({ recordCostEvent });
+    const listener = new EventListener({ client, effects, scheduler });
+    listener.attach("sess-mix", "task-mix");
+
+    ws.emitMessage({
+      tipo: "metrica",
+      dados: {
+        tipo: "llm_call",
+        tokens_input: 100,
+        tokens_output: 50,
+        modelo: "gpt-4o-mini",
+        custo_usd: 0.001,
+      },
+    });
+    ws.emitMessage({
+      tipo: "metrica",
+      dados: { tipo: "latencia_ms", valor: 250 },
+    });
+    ws.emitMessage({
+      tipo: "metrica",
+      dados: {
+        tipo: "llm_call",
+        tokens_input: 800,
+        tokens_output: 200,
+        modelo: "gpt-4o",
+        custo_usd: 0.02,
+      },
+    });
+    await flush();
+
+    expect(recordCostEvent).toHaveBeenCalledTimes(2);
+    const totalCusto = recordCostEvent.mock.calls.reduce(
+      (sum, call) => sum + (call[1] as { custo_usd: number }).custo_usd,
+      0,
+    );
+    expect(totalCusto).toBeCloseTo(0.021, 6);
+    const totalTokensIn = recordCostEvent.mock.calls.reduce(
+      (sum, call) => sum + (call[1] as { tokens_input: number }).tokens_input,
+      0,
+    );
+    expect(totalTokensIn).toBe(900);
   });
 
   it("reconecta em close inesperado e reseta o contador apos open", async () => {
